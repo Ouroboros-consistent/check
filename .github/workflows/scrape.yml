@@ -2,7 +2,7 @@ name: 🏨 Scrape Hotel Rating
 
 on:
   schedule:
-    - cron: "0 0 * * 1"
+    - cron: "0 0 * * 1"   # Setiap Senin 07:00 WIB
   workflow_dispatch:
 
 jobs:
@@ -22,18 +22,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: 🌐 Install Google Chrome
+        run: |
+          wget -q -O chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./chrome.deb
+          google-chrome --version
+
+      - name: 🔧 Install ChromeDriver (otomatis cocok dengan Chrome)
+        run: |
+          pip install webdriver-manager
+
       - name: 📦 Install dependencies
         run: pip install -r requirements.txt
-
-      - name: 🕵️ Debug — simpan HTML hasil fetch
-        run: python debug_fetch.py
-
-      - name: 📤 Upload HTML debug sebagai artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-html
-          path: debug_output.html
-          retention-days: 1
 
       - name: 🕷️ Run scraper
         run: python scraper.py
