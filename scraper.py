@@ -1,167 +1,164 @@
 """
-Booking.com Hotel Scraper - Contoh untuk pembelajaran
-Teknik: curl_cffi (anti-bot) + JSON-LD (stabil) + CSS fallback
+Booking.com Hotel Scraper - Selenium + Chrome Headless
+Pakai browser sungguhan → jauh lebih susah diblokir
+100% gratis, tidak butuh layanan eksternal
 """
 
 import json
 import random
-import re
 import time
 from datetime import datetime
 from pathlib import Path
 
-from bs4 import BeautifulSoup
-
-try:
-    from curl_cffi import requests
-    CURL_AVAILABLE = True
-    print("✅ Menggunakan curl_cffi (mode anti-bot)")
-except ImportError:
-    import requests
-    CURL_AVAILABLE = False
-    print("⚠️  curl_cffi tidak tersedia, pakai requests biasa")
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 # ─────────────────────────────────────────
 # KONFIGURASI
 # ─────────────────────────────────────────
 
-HOTEL_URL = "https://www.booking.com/hotel/id/arena-villa.id.html"
+HOTEL_URL   = "https://www.booking.com/hotel/id/arena-villa.id.html"
 OUTPUT_FILE = "data/hotel_data.json"
 
-PROXIES = [
-    # "123.45.67.89:8080",   ← isi dengan proxy kamu
-]
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
+# ─────────────────────────────────────────
+# SETUP CHROME
+# ─────────────────────────────────────────
 
-BROWSER_IMPERSONATIONS = ["chrome110", "chrome116", "chrome120", "chrome124"]
+def create_driver():
+    """Buat Chrome headless yang susah dideteksi sebagai bot."""
+    options = Options()
+
+    # Mode headless — tidak perlu monitor (wajib di server)
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+
+    # Sembunyikan tanda-tanda bot
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # User-Agent manusia
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    )
+
+    # Bahasa Indonesia
+    options.add_argument("--lang=id-ID")
+    options.add_experimental_option("prefs", {"intl.accept_languages": "id,id_ID"})
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+
+    # Hapus property webdriver agar tidak terdeteksi
+    driver.execute_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+
+    return driver
 
 
 # ─────────────────────────────────────────
-# ROTATING PROXY & HEADERS
+# SCRAPING
 # ─────────────────────────────────────────
 
-def get_random_proxy():
-    if not PROXIES:
-        return None
-    proxy = random.choice(PROXIES)
-    return {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+def scrape_hotel(url):
+    """Buka halaman hotel dan ambil rating + jumlah ulasan."""
+    driver = create_driver()
 
+    try:
+        print(f"🌐 Membuka: {url}")
+        driver.get(url)
 
-def get_random_headers():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://www.google.com/",
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "upgrade-insecure-requests": "1",
-    }
+        # Tunggu halaman dimuat (maks 15 detik)
+        wait = WebDriverWait(driver, 15)
 
+        # Jeda acak seperti manusia membaca halaman
+        time.sleep(random.uniform(2, 4))
 
-# ─────────────────────────────────────────
-# FETCH HALAMAN
-# ─────────────────────────────────────────
+        # Scroll sedikit ke bawah (meniru perilaku manusia)
+        driver.execute_script("window.scrollBy(0, 400)")
+        time.sleep(random.uniform(1, 2))
 
-def fetch_page(url, retries=3):
-    for attempt in range(1, retries + 1):
-        print(f"[Attempt {attempt}/{retries}] Mengambil halaman...")
-        proxy = get_random_proxy()
-        headers = get_random_headers()
+        print(f"📄 Judul halaman: {driver.title}")
+        print(f"📏 Ukuran halaman: {len(driver.page_source):,} karakter")
 
-        try:
-            if CURL_AVAILABLE:
-                impersonate = random.choice(BROWSER_IMPERSONATIONS)
-                response = requests.get(
-                    url, headers=headers, proxies=proxy,
-                    impersonate=impersonate, timeout=20,
-                )
-            else:
-                response = requests.get(url, headers=headers, proxies=proxy, timeout=20)
+        rating       = None
+        review_count = None
 
-            response.raise_for_status()
-            html = response.text
+        # ── Cari Rating ──────────────────────────────────────────
+        # Selector 1: data-testid
+        selectors_rating = [
+            "[data-testid='review-score-component'] [class*='score']",
+            "[data-testid='review-score-right-component'] div:first-child",
+            ".bui-review-score__badge",
+            "[class*='review-score-badge']",
+            "[aria-label*='Skor']",
+            "[aria-label*='score']",
+        ]
+        for sel in selectors_rating:
+            try:
+                elem = driver.find_element(By.CSS_SELECTOR, sel)
+                text = elem.text.strip()
+                if text and any(c.isdigit() for c in text):
+                    rating = text
+                    print(f"  ✅ Rating via '{sel}': {rating}")
+                    break
+            except Exception:
+                continue
 
-            if "captcha" in html.lower() or len(html) < 5000:
-                raise ValueError("Halaman tidak valid (mungkin CAPTCHA)")
+        # ── Cari Jumlah Ulasan ───────────────────────────────────
+        selectors_review = [
+            "[data-testid='review-score-right-component'] div:nth-child(2)",
+            "[data-testid='review-score-right-component'] div:nth-child(3)",
+            ".bui-review-score__text",
+            "[class*='review-score__text']",
+        ]
+        for sel in selectors_review:
+            try:
+                elem = driver.find_element(By.CSS_SELECTOR, sel)
+                text = elem.text.strip()
+                if text and ("ulasan" in text.lower() or "review" in text.lower() or text.isdigit()):
+                    review_count = text
+                    print(f"  ✅ Ulasan via '{sel}': {review_count}")
+                    break
+            except Exception:
+                continue
 
-            print(f"✅ Berhasil! Ukuran HTML: {len(html):,} karakter")
-            return html
+        # ── Fallback: cari lewat teks halaman ───────────────────
+        if not rating or not review_count:
+            import re
+            page_text = driver.find_element(By.TAG_NAME, "body").text
 
-        except Exception as e:
-            print(f"❌ Gagal: {e}")
-            if attempt < retries:
-                wait = random.uniform(5, 12)
-                print(f"⏳ Tunggu {wait:.1f}s sebelum retry...")
-                time.sleep(wait)
+            if not rating:
+                m = re.search(r'\b([7-9]\.\d|10\.0)\b', page_text)
+                if m:
+                    rating = m.group(1)
+                    print(f"  ✅ Rating via teks: {rating}")
 
-    raise RuntimeError("Semua percobaan gagal.")
+            if not review_count:
+                m = re.search(r'(\d[\d.,]+)\s*(ulasan|review)', page_text, re.I)
+                if m:
+                    review_count = f"{m.group(1)} {m.group(2)}"
+                    print(f"  ✅ Ulasan via teks: {review_count}")
 
+        return {
+            "rating": rating or "Tidak ditemukan",
+            "review_count": review_count or "Tidak ditemukan",
+        }
 
-# ─────────────────────────────────────────
-# PARSE DATA — 2 LAPIS FALLBACK
-# ─────────────────────────────────────────
-
-def parse_via_json_ld(soup):
-    """
-    LAPISAN 1 — Paling stabil.
-    Booking.com menyimpan data di JSON-LD (schema.org) di dalam <script>.
-    Format ini jarang berubah walau tampilan web ganti total.
-    """
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string)
-            items = data if isinstance(data, list) else [data]
-            for item in items:
-                agg = item.get("aggregateRating", {})
-                if agg:
-                    rating = str(agg.get("ratingValue", ""))
-                    count  = str(agg.get("reviewCount") or agg.get("ratingCount", ""))
-                    if rating:
-                        print("  → Sumber: JSON-LD ✅")
-                        return rating, f"{count} ulasan" if count else "N/A"
-        except Exception:
-            continue
-    return None, None
-
-
-def parse_via_regex(soup):
-    """
-    LAPISAN 2 — Fallback regex di seluruh teks halaman.
-    Cari pola angka rating (7.0–10.0) dan kata 'ulasan/review'.
-    """
-    text = soup.get_text()
-
-    rating = None
-    match = re.search(r'\b([7-9]\.\d|10\.0)\b', text)
-    if match:
-        rating = match.group(1)
-
-    review_count = None
-    m = re.search(r'(\d[\d.,]+)\s*(ulasan|review|penilaian)', text, re.I)
-    if m:
-        review_count = f"{m.group(1)} {m.group(2)}"
-
-    if rating:
-        print("  → Sumber: regex fallback ✅")
-    return rating, review_count
-
-
-def parse_hotel_data(html):
-    soup = BeautifulSoup(html, "lxml")
-    rating, review_count = parse_via_json_ld(soup)
-    if not rating:
-        rating, review_count = parse_via_regex(soup)
-    return {
-        "rating": rating or "Tidak ditemukan",
-        "review_count": review_count or "Tidak ditemukan",
-    }
+    finally:
+        driver.quit()
 
 
 # ─────────────────────────────────────────
@@ -190,11 +187,10 @@ def save_data(filepath, data):
 
 def main():
     print("=" * 50)
-    print("🏨 Booking.com Hotel Scraper")
+    print("🏨 Booking.com Scraper — Selenium")
     print("=" * 50)
 
-    html = fetch_page(HOTEL_URL)
-    scraped = parse_hotel_data(html)
+    scraped = scrape_hotel(HOTEL_URL)
 
     print(f"\n📊 Hasil scraping:")
     print(f"   Rating       : {scraped['rating']}")
